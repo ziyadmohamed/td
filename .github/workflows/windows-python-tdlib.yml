@@ -1,0 +1,114 @@
+name: Windows TDLib Python Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/windows-python-tdlib.yml"
+      - "CMakeLists.txt"
+      - "CMake/**"
+      - "td/**"
+      - "tdutils/**"
+      - "tdactor/**"
+      - "tdnet/**"
+      - "tddb/**"
+      - "tdtl/**"
+      - "sqlite/**"
+      - "tde2e/**"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-python-tdlib.yml"
+      - "CMakeLists.txt"
+      - "CMake/**"
+      - "td/**"
+      - "tdutils/**"
+      - "tdactor/**"
+      - "tdnet/**"
+      - "tddb/**"
+      - "tdtl/**"
+      - "sqlite/**"
+      - "tde2e/**"
+
+jobs:
+  build-windows-python:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_TRIPLET: x64-windows
+      BUILD_DIR: ${{ github.workspace }}\build
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          Set-Location "$env:VCPKG_ROOT"
+          .\bootstrap-vcpkg.bat
+
+      - name: Install TDLib dependencies via vcpkg
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" install `
+            gperf:$env:VCPKG_TRIPLET `
+            openssl:$env:VCPKG_TRIPLET `
+            zlib:$env:VCPKG_TRIPLET
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B "$env:BUILD_DIR" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DGPERF_EXECUTABLE="$env:VCPKG_ROOT\installed\$env:VCPKG_TRIPLET\tools\gperf\gperf.exe"
+
+      - name: Build tdjson target
+        shell: pwsh
+        run: |
+          cmake --build "$env:BUILD_DIR" --config Release --target tdjson
+
+      - name: Python smoke test
+        shell: pwsh
+        run: |
+          $dll = "$env:BUILD_DIR\Release\tdjson.dll"
+          if (!(Test-Path $dll)) {
+            throw "tdjson.dll not found at $dll"
+          }
+
+          $env:PATH = "$env:VCPKG_ROOT\installed\$env:VCPKG_TRIPLET\bin;$env:PATH"
+          $env:TDJSON_DLL = $dll
+
+          $script = @'
+          import ctypes
+          import os
+
+          dll = os.environ["TDJSON_DLL"]
+          tdjson = ctypes.CDLL(dll)
+          tdjson.td_create_client_id.restype = ctypes.c_int
+          client_id = tdjson.td_create_client_id()
+          print(f"tdjson loaded from: {dll}")
+          print(f"td_create_client_id -> {client_id}")
+          if client_id <= 0:
+              raise RuntimeError("td_create_client_id returned a non-positive value")
+          '@
+          $script | python -
+
+      - name: Upload tdjson artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdjson-windows-x64
+          path: |
+            build/Release/tdjson.dll
+            vcpkg/installed/x64-windows/bin/libcrypto-3-x64.dll
+            vcpkg/installed/x64-windows/bin/libssl-3-x64.dll
+            vcpkg/installed/x64-windows/bin/zlib1.dll
+          if-no-files-found: error
